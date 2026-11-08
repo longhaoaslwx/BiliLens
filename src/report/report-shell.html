@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__TITLE__</title>
+  <style>
+__CSS__
+  </style>
+  <style>
+    /* ---- 静态报告覆盖层：解除弹窗 420px 固定尺寸与 overflow:hidden，适配任意视口并允许整页滚动 ---- */
+    html, body {
+      width: auto; max-width: none; min-height: 0; max-height: none; height: auto;
+      overflow: visible; /* 关键：弹窗样式为单滚动容器设了 hidden，报告页必须恢复整页滚动 */
+    }
+    html { background: var(--bg); }
+    body { display: block; padding: 0 0 40px; background: var(--bg); }
+
+    .report-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 14px 16px; border-bottom: 1px solid var(--border);
+      background: var(--surface); position: sticky; top: 0; z-index: 5;
+    }
+    .report-header .brand { align-items: center; }
+    .report-meta { font-size: 11px; color: var(--muted); text-align: right; line-height: 1.5; }
+
+    .report-body { max-width: 980px; margin: 0 auto; padding: 14px 16px 0; }
+
+    .report-tier {
+      margin: 22px 0 10px; padding: 7px 12px; border-radius: var(--radius);
+      border: 1px solid var(--border); background: var(--surface-2);
+      font-size: 13px; font-weight: 700; letter-spacing: 1px; color: var(--accent);
+    }
+    .report-tier small { margin-left: 8px; font-weight: 400; color: var(--faint); letter-spacing: 0; }
+    .report-tier:nth-of-type(1) { margin-top: 4px; }
+
+    /* 宽视口下放开弹窗的单列限制 */
+    .kv-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+    /* 雷达图在报告里可以画大一点；弹窗里限制 300px 是为了避免 SVG 缩放糊字 */
+    .report-body .radar-svg { max-width: 420px; }
+    @media (min-width: 720px) {
+      .sum-grid { grid-template-columns: 1fr 1fr; }
+      .prob-label { width: 130px; }
+    }
+
+    .report-footer {
+      max-width: 980px; margin: 26px auto 0; padding: 12px 16px;
+      border-top: 1px solid var(--border); color: var(--faint); font-size: 11px; line-height: 1.7;
+    }
+    @media print {
+      .report-header { position: static; }
+      body { background: #fff; }
+    }
+  </style>
+</head>
+<body class="static-report">
+  <header class="report-header">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" class="brand-mark" aria-hidden="true">
+        <circle cx="12" cy="12" r="8.5" />
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3" />
+      </svg>
+      <div class="brand-text">
+        <strong>BiliLens 静态画像报告</strong>
+        <span>纯静态快照 · 离线可查 · 不随源站更新</span>
+      </div>
+    </div>
+    <div class="report-meta">
+      生成时间 __GENERATED__<br />
+      卡片优先级：分析结果 &gt; 分析手段 &gt; 分析证据
+    </div>
+  </header>
+
+  <main class="report-body">
+__BODY__
+  </main>
+
+  <footer class="report-footer">
+    本页由 BiliLens 扩展在本机生成，所有统计与分类均基于生成时刻清洗后的公开数据重算，未采用任何服务端模型输出。
+    评分与分类是线索优先级与统计描述，不是事实结论；所有命中项须回到原始证据人工核验。工具不读取登录凭证、不绕过风控、不做去匿名化人肉。
+  </footer>
+</body>
+</html>

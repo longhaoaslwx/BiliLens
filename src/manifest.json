@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "BiliLens · B站用户画像与线索复核",
+  "short_name": "BiliLens",
+  "version": "1.5.4",
+  "description": "基于 B 站公开数据与第三方站点的用户画像、弹幕行为聚合与证据可视化工具（{{TARGET_LABEL}}）。",
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "downloads",
+    "tabs",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://api.bilibili.com/*",
+    "https://*.bilibili.com/*",
+    "https://*.hdslb.com/*",
+    "https://danmakus.com/*",
+    "https://api.aicu.cc/*",
+    "https://www.aicu.cc/*",
+    "https://matsuri.icu/*",
+    "https://zeroroku.com/*",
+    "https://api.zeroroku.com/*",
+    "https://api.vtbs.moe/*",
+    "https://vtbs.moe/*",
+    "https://api.ukamnads.icu/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "BiliLens · B站用户画像",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
+  },
+  "options_page": "options/options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.bilibili.com/*",
+        "https://space.bilibili.com/*",
+        "https://search.bilibili.com/*",
+        "https://t.bilibili.com/*"
+      ],
+      "js": ["content/bili.js"],
+      "css": ["content/bili.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

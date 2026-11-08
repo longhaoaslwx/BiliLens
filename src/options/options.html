@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>BiliLens 设置</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <svg viewBox="0 0 24 24" class="mark" aria-hidden="true">
+        <circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3.2" />
+        <path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3" />
+      </svg>
+      <div>
+        <h1>BiliLens 设置</h1>
+        <p>采集节流、评分口径、多源数据、数据清洗与数据管理</p>
+      </div>
+    </header>
+
+    <section>
+      <h2>采集与节流</h2>
+      <p class="desc">节流用于避免对 B 站接口造成压力，也降低触发风控的概率。触发 -352 / -412 后，对应接口自动冷却 60 秒，不重试。</p>
+      <div class="grid">
+        <label>请求最小间隔（毫秒，≥300）
+          <input type="number" id="minGapMs" min="300" max="5000" step="100" />
+        </label>
+        <label>结果缓存有效期（分钟）
+          <input type="number" id="cacheTtlMin" min="0" max="1440" step="1" />
+        </label>
+        <label>评论区默认页数
+          <input type="number" id="commentPages" min="1" max="10" />
+        </label>
+        <label>评论每页条数
+          <input type="number" id="commentPageSize" min="5" max="49" />
+        </label>
+        <label>批量画像默认上限
+          <input type="number" id="maxBatchUsers" min="1" max="60" />
+        </label>
+        <label>投稿列表每页条数
+          <input type="number" id="videoPageSize" min="5" max="50" />
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <h2>评分口径</h2>
+      <p class="desc">评分为可解释的线索优先级。数据缺失时规则跳过，绝不把「取不到」计为风险。默认不启用关键词计分，词表由你自行定义，避免内置主观判断。</p>
+      <label class="check">
+        <input type="checkbox" id="enableKeywordScoring" />
+        <span>启用自定义关键词计分（规则 R09，每条命中 +7 分，上限 +20）</span>
+      </label>
+      <label>关键词表（一行一个，仅在评论样本中匹配）
+        <textarea id="attackKeywords" rows="5" placeholder="在此填写你自己的检索词，留空表示不启用"></textarea>
+      </label>
+      <p class="desc">评分规则表（权重固定）：R01 低等级低粉丝 +12、R02 无投稿 +10、R03 标题模板化 +18、R04 短时集中投稿 +14、R05 关注粉丝倒挂 +10、R06 长期零互动 +8、R07 资料稀薄 +6、R08 评论时间聚集 +8、R10 共享话术簇 +22、R11 同质账号簇 +8。总分上限 100。</p>
+    </section>
+
+    <section>
+      <h2>多源数据（BiliScope 风格站点聚合）</h2>
+      <p class="desc">按 UID 向七个查询项（六个站点 + Danmakus 弹幕行为画像）读取公开数据并缓存结果，用于证据展示与可视化。站点级节流、命中风控只冷却不重试；结果口径与时效性不受本工具控制，默认不参与评分。</p>
+      <div class="grid">
+        <label>多源缓存有效期（分钟，0 表示不缓存）
+          <input type="number" id="federatedTtlMin" min="0" max="1440" step="1" />
+        </label>
+        <label>单站请求超时（毫秒）
+          <input type="number" id="federatedTimeoutMs" min="3000" max="60000" step="1000" />
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="federatedRedact" />
+        <span>多源缓存中不保存第三方评论原文（仅保留时间与计数）</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="enableFederatedScoring" />
+        <span>让第三方证据参与评分（F01 / F02，默认关闭）</span>
+      </label>
+      <p class="desc">勾选要查询的站点；弹窗「多源数据」标签页内的勾选与此同步。F01 第三方评论样本时段高度集中 +8、F02 第三方评论量与官方产出不匹配 +6，均须人工核验。</p>
+      <div id="fed-site-list" class="fed-site-list">正在读取站点清单…</div>
+
+      <p class="desc"><strong>弹幕行为画像</strong>（Danmakus /analyze 完整维度，本机聚合）：按 UID 取回公开弹幕 / 事件记录，在扩展本地完成数据清洗后，计算留痕构成、活跃节律、频道偏好、表达风格、支持方式与五维统计分组。实测服务端忽略 start/end，日期范围由本工具按记录时间戳在本地筛选；不调用对方 POST 分析任务接口，也不使用其服务端主观性格标签。</p>
+      <div class="grid">
+        <label>起始日期（YYYY-MM-DD，留空不限）
+          <input type="text" id="federatedLiveStart" placeholder="2020-01-01" autocomplete="off" />
+        </label>
+        <label>结束日期（YYYY-MM-DD，留空不限）
+          <input type="text" id="federatedLiveEnd" placeholder="2026-11-08" autocomplete="off" />
+        </label>
+        <label>最多取回页数（1–5）
+          <input type="number" id="federatedLiveMaxPages" min="1" max="5" />
+        </label>
+        <label>每页场次数（10–50）
+          <input type="number" id="federatedLivePageSize" min="10" max="50" />
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="federatedLiveHideOnlyEnter" />
+        <span>隐藏「仅有入场记录」的场次（站点参数，会显著改变 total 口径）</span>
+      </label>
+      <div class="actions">
+        <button id="fed-clear-cache-btn" class="secondary">仅清除多源缓存</button>
+      </div>
+      <div id="fed-cache-status" class="status"></div>
+    </section>
+
+    <section>
+      <h2>数据清洗（自动执行，无需配置）</h2>
+      <p class="desc">所有第三方原始结果在进入聚合画像与可视化图表之前，固定经过四道工序；顺序不可颠倒，每道工序逐项计数并写入弹窗「数据清洗报告」与导出 JSON。清洗只做结构化纠错，不补全、不推断、不修改原始事实；完整原始逐站结果仍保留在证据链中。</p>
+      <div class="clean-list">
+        <div><strong>1 · 字段规范化</strong><span>统一 v2/v3 结构、ID 类型、时间戳单位（秒→毫秒）、文本全半角与数组字段；按 UTC+8 分桶。</span></div>
+        <div><strong>2 · 缺失值处理</strong><span>数值缺失记为 null 并排除出汇总，文本缺失记为空串；缺失不等于 0，绝不把「取不到」写成 0。</span></div>
+        <div><strong>3 · 异常值处理</strong><span>越界时间戳剔除、负数与非有限数截断、超长文本截断，全部计数留痕。</span></div>
+        <div><strong>4 · 数据去重</strong><span>关注主播按 uId、场次按 liveId、记录按内容签名去重；保留 duplicateCount，去重前后可回溯。</span></div>
+      </div>
+      <p class="desc">实测问题样本：Danmakus 关注主播接口 102 行中仅 43 个唯一主播（59 行为同一快照按场次重复）；弹幕历史 512 条记录含 5 条完全重复记录、117 条无 payload 的入场记录。去重与缺失处理后，标签分布、累计弹幕量、词云与全部图表才不会失真。</p>
+    </section>
+
+    <section>
+      <h2>导出与数据</h2>
+      <label class="check">
+        <input type="checkbox" id="redactExport" />
+        <span>导出时脱敏（移除昵称、评论原文、投稿文本与簇证据）</span>
+      </label>
+      <div id="storage-info" class="storage">正在读取本地存储状态…</div>
+      <div class="actions">
+        <button id="save-btn" class="primary">保存设置</button>
+        <button id="reset-btn" class="secondary">恢复默认</button>
+        <button id="clear-btn" class="danger">清除全部本地数据</button>
+      </div>
+      <div id="save-status" class="status"></div>
+    </section>
+
+    <section class="notice">
+      <strong>合规边界。</strong>仅使用 B 站公开接口、你自己浏览器上下文中的公开数据与已列明的第三方公开端点；不读取或保存登录凭证，不绕过风控，不做去匿名化人肉，不申请跨站通配符权限。第三方数据不代表官方事实，评分不代表事实结论。请遵守各平台服务条款，所有结论须回到原始证据人工核验。
+    </section>
+  </div>
+  <script src="options.js" defer></script>
+</body>
+</html>
