@@ -299,4 +299,18 @@ const after = await call({ type: 'GET_STATE' });
 assert.equal(after.hasReport, false);
 console.log('OK  RESET_SETTINGS + CLEAR_DATA');
 
+// 回归：B 站页面通道永久挂起时，官方请求必须在页面通道超时后回退后台直连，
+// 而不是让整轮聚合卡在「聚合中…」（v1.5.4 的故障现场）。
+const { getCard } = await import(pathToFileURL(resolve('src/lib/bili-api.js')).href);
+globalThis.chrome.tabs = {
+  query: async () => [{ id: 901 }],
+  sendMessage: () => new Promise(() => {})
+};
+const hangStarted = Date.now();
+const hangCard = await getCard('123');
+const hangElapsed = Date.now() - hangStarted;
+assert.equal(hangCard.ok, true, 'page channel hang must fall back to worker fetch');
+assert.ok(hangElapsed < 8_000, `page channel timeout should be about 4s, got ${hangElapsed}ms`);
+console.log(`OK  page channel hang -> worker fallback (${hangElapsed} ms)`);
+
 console.log('SMOKE CHECKS PASSED');

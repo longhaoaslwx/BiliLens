@@ -20,9 +20,26 @@ import { analyzeSpamBursts } from '../lib/spam.js';
 
 let pageContext = null;
 
+// 整轮聚合硬上限：任何一层卡住，后台都必须在弹窗超时之前给出明确回包。
+const FEDERATED_DEADLINE_MS = 120_000;
+
 function progress(phase, done, total, message) {
   chrome.runtime.sendMessage({ type: 'BILILENS_PROGRESS', phase, done, total, message })
     .catch(() => {});
+}
+
+/** 阶段性提示（不改变进度条数值）：通道回退、超时、跳过站点等都要让用户看见。 */
+function notice(phase, text, level = 'info') {
+  chrome.runtime.sendMessage({ type: 'BILILENS_NOTICE', phase, text, level, at: Date.now() })
+    .catch(() => {});
+}
+
+function withDeadline(promise, ms, onTimeout) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(onTimeout()), ms); })
+  ]).finally(() => clearTimeout(timer));
 }
 
 async function cached(key, ttlMs, producer) {
@@ -303,6 +320,8 @@ function federatedOptions(settings, extra = {}) {
 }
 
 async function analyzeFederated(payload, settings) {
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + FEDERATED_DEADLINE_MS;
   const parsed = parseUserInput(payload.input);
   if (parsed.kind !== 'uid') {
     return { ok: false, error: '多源站点只接受 UID 或 space 主页链接，请先确认目标 UID。' };
@@ -317,12 +336,17 @@ async function analyzeFederated(payload, settings) {
   const totalSteps = siteIds.length + 1;
 
   progress('federated', 0, totalSteps, `正在采集 UID ${mid} 的官方画像`);
+  notice('federated', `开始聚合 ${siteIds.length} 个站点，整轮上限 ${FEDERATED_DEADLINE_MS / 1000} 秒；B 站页面通道 4 秒无响应会自动回退后台直连。`, 'info');
   const raw = await collectUser(mid, { withVideos: true, withAnnotations: true });
   const profile = buildProfile(raw);
+  progress('federated', 1, totalSteps, '官方画像采集完成，开始逐站查询');
 
   const results = await queryAll(mid, federatedOptions(settings, {
     siteIds,
     force: !!payload.force,
+    deadlineAt,
+    onSiteStart: (index, total, site) =>
+      progress('federated', index + 1, total + 1, `正在查询 ${site.name}（${index + 1}/${total}）`),
     onProgress: (done, total, result) =>
       progress('federated', done + 1, total + 1, `${result.siteName}：${result.message}`)
   }));
@@ -348,7 +372,15 @@ async function analyzeFederated(payload, settings) {
     }
   });
   await saveReport(report);
-  return { ok: true, report, federated: summary, cleaning: summary.cleaning };
+  const timedOut = results.filter((r) => r.status === 'timeout');
+  if (timedOut.length) {
+    notice('federated', `已到整轮时间上限，${timedOut.map((r) => r.siteName).join('、')} 未查询；可在结果页对这些站点单独点「刷新」。`, 'warn');
+  }
+  return {
+    ok: true, report, federated: summary, cleaning: summary.cleaning,
+    elapsedMs: Date.now() - startedAt,
+    timedOutSites: timedOut.map((r) => r.siteName)
+  };
 }
 
 /* ------------------------------ 导出 ------------------------------ */
@@ -415,7 +447,10 @@ async function exportReport(format) {
 
 async function handle(message) {
   const settings = await getSettings();
-  configure({ minGapMs: settings.minGapMs });
+  configure({
+    minGapMs: settings.minGapMs,
+    onNotice: (text) => notice(message.type === 'ANALYZE_FEDERATED' ? 'federated' : 'profile', text, 'warn')
+  });
 
   switch (message.type) {
     case 'GET_STATE':
@@ -452,7 +487,11 @@ async function handle(message) {
       return { ok: true, sites: publicSites(), risk: federatedRiskState() };
 
     case 'ANALYZE_FEDERATED':
-      return analyzeFederated(message, settings);
+      return withDeadline(analyzeFederated(message, settings), FEDERATED_DEADLINE_MS + 5_000, () => ({
+        ok: false,
+        code: 'AGGREGATION_TIMEOUT',
+        error: `聚合超过 ${FEDERATED_DEADLINE_MS / 1000} 秒上限，已中止本次等待。多半是第三方站点连接挂起或页面通道被冻结；后台可能仍在收尾，稍后重新打开弹窗可查看已保存的报告。`
+      }));
 
     case 'FEDERATED_CLEAR_CACHE': {
       const removed = await clearCacheByPrefix('fed:');
@@ -466,7 +505,8 @@ async function handle(message) {
       }
       const site = SITES.find((s) => s.id === message.siteId);
       if (!site) return { ok: false, error: '未知站点 ID' };
-      const result = await querySite(site, report.target.value, federatedOptions(settings, { force: true }));
+      const result = await querySite(site, report.target.value,
+        federatedOptions(settings, { force: true, deadlineAt: Date.now() + 25_000 }));
       const previous = report.extra.federated.rawResults || [];
       const merged = previous.some((r) => r.siteId === site.id)
         ? previous.map((r) => (r.siteId === site.id ? result : r))

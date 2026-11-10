@@ -199,6 +199,24 @@ tr.clickable:hover { background: var(--surface-2); }
 .error { background: rgba(233, 122, 122, 0.08); border: 1px solid rgba(233, 122, 122, 0.35); color: #f0a8a8; border-radius: var(--radius); padding: 10px; font-size: 11px; }
 .empty { color: var(--faint); font-size: 11px; text-align: center; padding: 18px 0; }
 
+/* 聚合过程日志与失败诊断：卡住时用户能看见「当前在哪一步」和下一步该做什么 */
+.autofill-hint { margin-top: 6px; padding: 5px 8px; border: 1px solid rgba(108, 207, 156, .28); border-radius: var(--radius); background: rgba(108, 207, 156, .07); color: var(--ok); font-size: 10px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.autofill-hint.hidden { display: none; }
+.autofill-hint.manual { border-color: rgba(228, 180, 95, .3); background: rgba(228, 180, 95, .07); color: var(--warn); }
+.autofill-hint.none { border-color: var(--border); background: var(--surface); color: var(--faint); }
+.autofill-hint .text-btn { font-size: 10px; }
+
+.live-log { margin-top: 10px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); max-height: 132px; overflow-y: auto; font-size: 10px; color: var(--muted); line-height: 1.7; }
+.live-log.hidden { display: none; }
+.live-line { padding: 1px 0; border-bottom: 1px solid rgba(255, 255, 255, .04); }
+.live-line:last-child { border-bottom: 0; }
+.live-line.warn { color: var(--warn); }
+.diag strong { display: block; margin-bottom: 6px; font-size: 11px; line-height: 1.6; }
+.diag-title { color: var(--text); margin: 6px 0 3px; }
+.diag-list { margin: 0; padding-left: 16px; }
+.diag-list li { margin: 3px 0; line-height: 1.6; }
+.notice.warn { border-left-color: var(--warn); }
+
 .statusbar { border-top: 1px solid var(--border); padding: 7px 14px 9px; }
 .progress-wrap { margin-bottom: 6px; }
 .progress-wrap.hidden { display: none; }

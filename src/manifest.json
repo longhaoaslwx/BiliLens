@@ -19,6 +19,7 @@
   "host_permissions": [
     "https://api.bilibili.com/*",
     "https://*.bilibili.com/*",
+    "https://api.live.bilibili.com/*",
     "https://*.hdslb.com/*",
     "https://danmakus.com/*",
     "https://api.aicu.cc/*",

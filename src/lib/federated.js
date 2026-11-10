@@ -131,6 +131,8 @@ export const SITES = [
 
 const RISK_STATUS = new Set([429, 451, 468, 503]);
 const COOLDOWN_MS = 60_000;
+// 机构字典逐个串行请求，必须限量，否则单站就可能拖满整个聚合窗口
+const MAX_AGENCY_UUIDS = 8;
 const cooldowns = new Map();
 
 // 机构字典端点：v3 无此路由，实测 v2 提供（2026-11-08 验证）
@@ -149,11 +151,15 @@ export function collectAgencyUuids(pages) {
   return [...out];
 }
 
-/** 逐个解析机构名；失败或风控时保留原始 UUID，绝不因字典缺失丢弃画像数据。 */
+/** 逐个解析机构名；失败或风控时保留原始 UUID，绝不因字典缺失丢弃画像数据。
+ *  机构数不设上限时，一次聚合可能派生出几十个串行请求，是「看似卡死」的常见来源。 */
 export async function resolveAgencyNames(uuids, options = {}) {
   const names = {};
-  const failed = [];
-  for (const uuid of uuids || []) {
+  const all = uuids || [];
+  const list = all.slice(0, MAX_AGENCY_UUIDS);
+  const failed = all.slice(MAX_AGENCY_UUIDS).slice();
+  for (const uuid of list) {
+    if (options.deadlineAt && Date.now() >= options.deadlineAt) { failed.push(uuid); continue; }
     const cacheKey = `fed:agency:${uuid}`;
     if (!options.force) {
       const hit = await cacheGet(cacheKey);
@@ -176,7 +182,7 @@ export async function resolveAgencyNames(uuids, options = {}) {
     failed.push(uuid);
     await sleep(300);
   }
-  return { names, failed };
+  return { names, failed, capped: all.length > MAX_AGENCY_UUIDS };
 }
 
 export function publicSites() {
@@ -541,7 +547,7 @@ export function parseEndpoint(siteId, key, text, uid, options = {}) {
 /* ------------------------------ 请求与缓存 ------------------------------ */
 
 async function fetchOne(url, options = {}) {
-  const timeout = options.timeout || 12_000;
+  const timeout = Math.max(1_000, Math.min(options.timeout || 12_000, 30_000));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   const started = Date.now();
@@ -559,7 +565,13 @@ async function fetchOne(url, options = {}) {
     const text = await res.text();
     return { ok: true, httpStatus: res.status, text, elapsedMs: Date.now() - started };
   } catch (error) {
-    return { ok: false, error: String(error), elapsedMs: Date.now() - started };
+    const timedOut = controller.signal.aborted;
+    return {
+      ok: false,
+      timedOut,
+      error: timedOut ? `请求超时（${Math.round(timeout / 1000)} 秒），未取得该站点数据` : String(error),
+      elapsedMs: Date.now() - started
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -596,14 +608,23 @@ async function queryPagedSite(site, uid, options = {}) {
   const pageSize = clamp(options.federatedLivePageSize, 10, 50, 50);
   const hideOnlyEnter = options.federatedLiveHideOnlyEnter === false ? 'false' : 'true';
   const pages = [];
-  let sessionTotal = 0, hasMore = false, sawRisk = false;
+  let sessionTotal = 0, hasMore = false, sawRisk = false, sawTimeout = false;
 
   for (let page = 1; page <= maxPages; page++) {
+    if (options.deadlineAt && Date.now() >= options.deadlineAt) {
+      result.status = 'timeout';
+      result.message = '整轮时间上限已到，剩余分页未请求；可单独点「刷新」补查';
+      break;
+    }
     const url = fill(site.endpoints[0].url, uid, { page, pageSize, hideOnlyEnter });
     result.sourceUrls.push(url);
     const response = await fetchOne(url, { timeout: options.timeoutMs || 12_000 });
     result.elapsedMs += response.elapsedMs;
-    if (!response.ok) { result.message = response.error; break; }
+    if (!response.ok) {
+      sawTimeout = sawTimeout || !!response.timedOut;
+      result.message = response.error;
+      break;
+    }
     result.httpStatus = response.httpStatus;
     if (RISK_STATUS.has(response.httpStatus) || response.httpStatus >= 500) {
       sawRisk = true;
@@ -624,9 +645,10 @@ async function queryPagedSite(site, uid, options = {}) {
     if (page < maxPages) await sleep(site.gapMs);
   }
 
+  if (result.status === 'timeout') return result;
   if (sawRisk) return result;
   if (!pages.length) {
-    result.status = 'error';
+    result.status = sawTimeout ? 'timeout' : 'error';
     if (!result.message) result.message = '未取到可用数据';
     return result;
   }
@@ -684,12 +706,19 @@ export async function querySite(site, uid, options = {}) {
 
   let sawRisk = false;
   let sawSuccess = false;
+  let sawTimeout = false;
   for (const endpoint of site.endpoints) {
+    if (options.deadlineAt && Date.now() >= options.deadlineAt) {
+      result.status = 'timeout';
+      result.message = '整轮时间上限已到，本站点剩余端点未请求；可单独点「刷新」补查';
+      break;
+    }
     const url = fill(endpoint.url, uid);
     result.sourceUrls.push(url);
     const response = await fetchOne(url, { accept: endpoint.accept, timeout: options.timeoutMs || 12_000 });
     result.elapsedMs += response.elapsedMs;
     if (!response.ok) {
+      sawTimeout = sawTimeout || !!response.timedOut;
       result.message = response.error;
       continue;
     }
@@ -738,16 +767,27 @@ export async function querySite(site, uid, options = {}) {
     if (site.endpoints.length > 1) await sleep(site.gapMs);
   }
 
-  if (!sawRisk && result.status !== 'error') {
+  if (!sawRisk && result.status !== 'error' && result.status !== 'timeout') {
     if (sawSuccess) result.status = 'data';
     else if (result.status === 'not_listed' || result.status === 'page_only') result.status = result.status;
   }
+  if (sawTimeout && result.status === 'error') result.status = 'timeout';
   if (result.status === 'error' && !result.message) result.message = '未取到可用数据';
 
-  if (!sawRisk) {
+  if (!sawRisk && result.status !== 'timeout') {
     await cacheSet(cacheKey, result, (options.ttlMin || 60) * 60 * 1000);
   }
   return result;
+}
+
+function deadlineResult(site, uid) {
+  return {
+    uid: String(uid), siteId: site.id, siteName: site.name, label: site.label,
+    pageUrl: fill(site.pageUrl, uid), sourceUrls: [], status: 'timeout',
+    message: '整轮时间上限已到，本站点未发起请求；可在结果页单独点「刷新」补查',
+    facts: {}, evidence: [], httpStatus: null, fetchedAt: new Date().toISOString(),
+    elapsedMs: 0, cached: false, note: site.note
+  };
 }
 
 export async function queryAll(uid, options = {}) {
@@ -757,10 +797,22 @@ export async function queryAll(uid, options = {}) {
     : SITES;
   const results = [];
   for (let i = 0; i < selected.length; i++) {
-    const result = await querySite(selected[i], uid, options);
+    const site = selected[i];
+    if (options.deadlineAt && Date.now() >= options.deadlineAt) {
+      results.push(deadlineResult(site, uid));
+      continue;
+    }
+    if (options.onSiteStart) options.onSiteStart(i, selected.length, site);
+    // 剩余时间不足时收窄单次超时，保证整轮不会突破后台的总时限
+    const remaining = options.deadlineAt ? options.deadlineAt - Date.now() : Infinity;
+    const perSite = { ...options };
+    if (Number.isFinite(remaining)) {
+      perSite.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs || 12_000, remaining));
+    }
+    const result = await querySite(site, uid, perSite);
     results.push(result);
     if (options.onProgress) options.onProgress(i + 1, selected.length, result);
-    if (i < selected.length - 1) await sleep(Math.max(250, selected[i].gapMs));
+    if (i < selected.length - 1) await sleep(Math.max(250, site.gapMs));
   }
   return results;
 }
@@ -782,7 +834,8 @@ export function summarizeFederated(results) {
     sitesTotal: results.length,
     sitesWithData: results.filter((r) => r.status === 'data').length,
     sitesCached: results.filter((r) => r.cached).length,
-    sitesFailed: results.filter((r) => r.status === 'error' || r.status === 'cooldown').length,
+    sitesFailed: results.filter((r) => r.status === 'error' || r.status === 'cooldown' || r.status === 'timeout').length,
+    sitesTimedOut: results.filter((r) => r.status === 'timeout').length,
     statuses: results.map((r) => ({
       siteId: r.siteId, siteName: r.siteName, status: r.status, cached: r.cached,
       message: r.message, elapsedMs: r.elapsedMs, httpStatus: r.httpStatus,

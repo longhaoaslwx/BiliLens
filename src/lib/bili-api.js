@@ -18,15 +18,37 @@ import { plainQuery, signQuery, extractWbiKeys, mixinKey } from './wbi.js';
 const BASE = 'https://api.bilibili.com';
 const RISK_CODES = new Set([-352, -412, -403, -509, -429]);
 const COOLDOWN_MS = 60_000;
+// 页面通道单次上限、串行队列单任务上限、坏标签页拉黑时长。
+// 三层上限保证任何一次请求挂起都不会让整轮聚合无限等待。
+const PAGE_TIMEOUT_MS = 4_000;
+const QUERY_TIMEOUT_MS = 3_000;
+const QUEUE_TIMEOUT_MS = 15_000;
+const BAD_TAB_MS = 60_000;
 
-let config = { minGapMs: 900 };
+let config = { minGapMs: 900, onNotice: null };
 let chain = Promise.resolve();
 let lastAt = 0;
 const cooldowns = new Map();
 const wbiCache = { mixin: null, at: 0 };
+const badTabs = new Map();
 
 export function configure(partial) {
   config = { ...config, ...partial };
+}
+
+function notice(text) {
+  if (typeof config.onNotice === 'function') {
+    try { config.onNotice(text); } catch { /* 提示失败不影响取数 */ }
+  }
+}
+
+/** 与 Promise.race 等价，但一定清理定时器，避免 MV3 service worker 被悬挂的 timer 拖住。 */
+function withTimeout(promise, ms, fallback) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); })
+  ]).finally(() => clearTimeout(timer));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -36,7 +58,12 @@ function queue(task) {
     const wait = Math.max(0, lastAt + config.minGapMs + Math.floor(Math.random() * 220) - Date.now());
     if (wait) await sleep(wait);
     lastAt = Date.now();
-    return task();
+    // 单任务硬超时：即使某个 fetch/messaging 永久 pending，串行链也能继续推进。
+    return withTimeout(Promise.resolve().then(task), QUEUE_TIMEOUT_MS, {
+      ok: false,
+      error: `QUEUE_TIMEOUT：单个请求超过 ${QUEUE_TIMEOUT_MS / 1000} 秒未返回`,
+      via: 'queue'
+    });
   });
   chain = run.catch(() => {});
   return run;
@@ -61,36 +88,53 @@ async function workerFetch(url) {
       return { ok: true, json: await res.json(), via: 'worker' };
     } catch (error) {
       // referrer 选项在部分运行时不被接受，降级为不带 referrer 的请求
-      if (options === init) return { ok: false, error: String(error), via: 'worker' };
+      if (options === init) {
+        notice(`B 站接口直连失败（${String(error && error.message || error)}），该字段将记为缺失`);
+        return { ok: false, error: String(error), via: 'worker' };
+      }
     }
   }
   return { ok: false, error: 'unreachable', via: 'worker' };
 }
 
 async function tryPageChannel(url) {
-  if (!chrome.tabs) return null;
+  if (!chrome.tabs || typeof chrome.tabs.sendMessage !== 'function') return null;
   let tabs = [];
   try {
-    // 覆盖全部注入站点：用户常停在 space 主页，只查 www 会漏掉，导致回落到无 Referer 的直连
-    tabs = await chrome.tabs.query({
+    tabs = await withTimeout(chrome.tabs.query({
       url: [
         'https://www.bilibili.com/*',
         'https://space.bilibili.com/*',
         'https://search.bilibili.com/*',
         'https://t.bilibili.com/*'
       ]
-    });
+    }), QUERY_TIMEOUT_MS, []);
   } catch {
     return null;
   }
-  for (const tab of tabs.slice(0, 3)) {
+  const now = Date.now();
+  for (const tab of (tabs || []).slice(0, 3)) {
+    if ((badTabs.get(tab.id) || 0) > now) continue;
+    let res;
     try {
-      const res = await chrome.tabs.sendMessage(tab.id, { type: 'BILILENS_PAGE_FETCH', url });
-      if (res && res.ok) return { ok: true, json: res.json, via: 'page' };
-      if (res && res.status) return { ok: false, error: `HTTP ${res.status}`, status: res.status, via: 'page' };
+      res = await withTimeout(
+        chrome.tabs.sendMessage(tab.id, { type: 'BILILENS_PAGE_FETCH', url }),
+        PAGE_TIMEOUT_MS,
+        { __pageTimeout: true }
+      );
     } catch {
-      // 该标签页未注入脚本，尝试下一个
+      // 该标签页未注入脚本或已失效，尝试下一个
+      continue;
     }
+    if (res && res.__pageTimeout) {
+      badTabs.set(tab.id, now + BAD_TAB_MS);
+      notice(`B 站页面通道 ${PAGE_TIMEOUT_MS / 1000} 秒无响应（标签页可能被冻结），已跳过并改用后台直连`);
+      continue;
+    }
+    if (res && res.ok) return { ok: true, json: res.json, status: res.status, via: 'page' };
+    // 明确的 HTTP 响应直接采用，不重复请求；网络层错误则回退到后台直连
+    if (res && res.status) return { ok: false, error: `HTTP ${res.status}`, status: res.status, via: 'page' };
+    if (res && res.error) return { ok: false, error: String(res.error), via: 'page' };
   }
   return null;
 }
@@ -99,6 +143,7 @@ async function execute(url, preferPage = true) {
   if (preferPage) {
     const page = await tryPageChannel(url);
     if (page && page.ok) return page;
+    if (page && page.status) return page;
   }
   return workerFetch(url);
 }

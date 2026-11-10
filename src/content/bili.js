@@ -11,12 +11,16 @@
   function detect() {
     const url = location.href;
     const context = { url, type: 'other', mids: [] };
-    const space = url.match(/space\.bilibili\.com\/(\d+)/i);
-    if (space) { context.type = 'user'; context.mid = space[1]; }
+    // 地址优先：B 站是 SPA，DOM 里的用户链接往往晚于地址栏变化
+    const space = url.match(/space\.bilibili\.com\/(\d{1,19})(?:[/?#]|$)/i);
+    const param = url.match(/[?&](?:mid|uid|host_mid|author_id|up_mid)=(\d{1,19})(?:[&#]|$)/i);
+    const fromUrl = space ? space[1] : (param ? param[1] : '');
+    if (fromUrl) { context.type = 'user'; context.mid = fromUrl; }
     const bv = url.match(/(BV[0-9A-Za-z]{10})/);
     if (bv) { context.type = 'video'; context.bvid = bv[0]; }
 
     const found = new Set();
+    if (context.mid) found.add(context.mid);
     document.querySelectorAll('a[href*="space.bilibili.com/"]').forEach((a) => {
       const m = (a.getAttribute('href') || '').match(/space\.bilibili\.com\/(\d+)/i);
       if (m) found.add(m[1]);
@@ -207,18 +211,30 @@
       return;
     }
     if (message.type === 'BILILENS_PAGE_FETCH') {
-      // 仅在 www.bilibili.com 页面上下文执行，保证 Referer 与 CORS 正确
+      // 仅在 www.bilibili.com 页面上下文执行，保证 Referer 与 CORS 正确。
+      // 必须给 fetch 加硬超时：页面被冻结 / 接口挂起时，若此处不回调，
+      // 后台的 tabs.sendMessage 会永久 pending，整轮聚合就会卡在「聚合中…」。
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8_000);
+      let replied = false;
+      const reply = (payload) => {
+        if (replied) return;
+        replied = true;
+        try { sendResponse(payload); } catch { /* 通道已关闭 */ }
+      };
       fetch(message.url, {
         method: 'GET',
         credentials: 'include',
+        signal: controller.signal,
         headers: { Accept: 'application/json, text/plain, */*' }
       })
         .then(async (res) => {
           let json = null;
           try { json = await res.json(); } catch { /* 非 JSON 响应 */ }
-          sendResponse({ ok: res.ok, status: res.status, json });
+          reply({ ok: res.ok, status: res.status, json });
         })
-        .catch((error) => sendResponse({ ok: false, error: String(error) }));
+        .catch((error) => reply({ ok: false, error: `页面请求失败或超时：${String(error)}` }))
+        .finally(() => clearTimeout(timer));
       return true;
     }
   });

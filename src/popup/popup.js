@@ -1,3 +1,7 @@
+import {
+  pickUid, bvidFromUrl, isBiliPage, describeDetection, UID_SOURCE_LABEL
+} from '../lib/page-uid.js';
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 const esc = (value) => String(value === null || value === undefined ? '' : value)
@@ -11,10 +15,47 @@ const safeUrl = (value) => {
   } catch { return '#'; }
 };
 
+/* 长任务给足后台执行窗口，短消息快速失败；任何消息都不允许无限等待。
+ * 没有这层兜底，后台不回包时 setBusy() 的 finally 永不执行，按钮会永远停在「聚合中…」。 */
+const SEND_TIMEOUT_MS = {
+  ANALYZE_FEDERATED: 135_000,
+  ANALYZE_VIDEO: 180_000,
+  PROFILE_BATCH: 180_000,
+  PROFILE_USER: 60_000,
+  FETCH_COMMENTS: 60_000,
+  FEDERATED_REFRESH_SITE: 30_000
+};
+const DEFAULT_SEND_TIMEOUT_MS = 12_000;
+
 const send = (message) => new Promise((resolve) => {
-  chrome.runtime.sendMessage(message, (response) => {
-    resolve(response || { ok: false, error: '后台无响应，请重新打开弹窗' });
-  });
+  const limit = SEND_TIMEOUT_MS[message && message.type] || DEFAULT_SEND_TIMEOUT_MS;
+  let settled = false;
+  const finish = (result, timer) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve(result);
+  };
+  const timer = setTimeout(() => finish({
+    ok: false,
+    code: 'FRONTEND_TIMEOUT',
+    error: `后台在 ${Math.round(limit / 1000)} 秒内未返回结果，已自动中止本次等待。后台可能仍在执行，稍后重新打开弹窗可查看已保存的报告。`
+  }, timer), limit);
+  try {
+    chrome.runtime.sendMessage(message, (response) => {
+      const last = chrome.runtime.lastError && chrome.runtime.lastError.message;
+      if (response) { finish(response, timer); return; }
+      finish({
+        ok: false,
+        code: last ? 'CHANNEL_CLOSED' : 'NO_RESPONSE',
+        error: last
+          ? `后台连接中断：${last}。常见于 service worker 被浏览器回收，请重新打开弹窗重试。`
+          : '后台未返回任何响应，请重新打开弹窗重试。'
+      }, timer);
+    });
+  } catch (error) {
+    finish({ ok: false, code: 'SEND_FAILED', error: `消息发送失败：${String(error && error.message || error)}` }, timer);
+  }
 });
 
 const state = {
@@ -23,8 +64,10 @@ const state = {
   pageContext: null,
   federatedSites: [],
   federatedSelected: new Set(),
-  federatedReport: null
+  federatedReport: null,
+  detected: null
 };
+let liveHideTimer = null;
 
 function setStatus(text, kind = '') {
   $('#status-text').textContent = text;
@@ -57,8 +100,49 @@ function setBusy(button, on, label) {
   }
 }
 
-function showError(container, message) {
-  container.innerHTML = `<div class="error">${esc(message)}</div>`;
+function showError(container, message, tips) {
+  const list = Array.isArray(tips) && tips.length
+    ? `<div class="diag-title">建议按以下顺序排查</div><ul class="diag-list">${tips.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>`
+    : '';
+  container.innerHTML = `<div class="error${list ? ' diag' : ''}"><strong>${esc(message)}</strong>${list}</div>`;
+}
+
+/** 把后台错误码翻译成可操作的排查建议，避免只丢一句「后台无响应」。 */
+function diagnose(res) {
+  const text = String((res && res.error) || '未知错误');
+  const code = (res && res.code) || '';
+  const tips = [];
+  if (code === 'FRONTEND_TIMEOUT' || code === 'AGGREGATION_TIMEOUT' || /超时|timeout/i.test(text)) {
+    tips.push('关闭所有 B 站标签页后重试。页面被浏览器冻结时，页面通道的请求不会返回，这是最常见的卡点。');
+    tips.push('在「查询站点」里只勾选 2–3 个必要站点，减少串行等待；已超时的站点可在结果页单独点「刷新」补查。');
+    tips.push('在设置页把「单站请求超时」调低到 5000–8000 毫秒，点「清除多源缓存」后重试。');
+  }
+  if (code === 'CHANNEL_CLOSED' || code === 'NO_RESPONSE' || code === 'SEND_FAILED' || /service worker|回收|连接中断|未返回/i.test(text)) {
+    tips.push('在 chrome://extensions 找到 BiliLens，点「重新加载」，再重新打开弹窗重试。');
+    tips.push('打开扩展详情页的「检查视图 service worker」Console，确认是否有 worker 被终止或权限报错。');
+  }
+  if (/-352|风控|冷却|429|468|451/i.test(text)) {
+    tips.push('目标接口触发风控：等待约 60 秒冷却结束，避免连续点击「忽略缓存强制刷新」。');
+    tips.push('确认浏览器已登录 B 站；页面通道携带的登录态可明显降低风控概率。');
+  }
+  if (!tips.length) {
+    tips.push('确认网络可访问目标站点，并在设置页降低「单站请求超时」后重试。');
+    tips.push('点「清除多源缓存」后重新聚合；若仍失败，检查扩展详情页的「站点访问」权限是否被关闭。');
+    tips.push('重新加载扩展，并在 service worker 的 Console 中查看具体报错行。');
+  }
+  return { text, tips };
+}
+
+function appendLive(text, level = 'info') {
+  const log = $('#fed-live');
+  if (!log) return;
+  log.classList.remove('hidden');
+  const line = document.createElement('div');
+  line.className = 'live-line' + (level === 'warn' ? ' warn' : '');
+  line.textContent = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · ${text}`;
+  log.appendChild(line);
+  while (log.children.length > 14) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
 }
 
 function switchTab(name) {
@@ -243,6 +327,7 @@ const FED_STATUS = {
   page_only: { label: '仅页面可达', color: '#e4b45f', cls: 'na' },
   not_listed: { label: '站点未收录', color: '#9ba4b3', cls: 'na' },
   cooldown: { label: '风控冷却', color: '#f0729a', cls: 'na' },
+  timeout: { label: '超时 / 未查询', color: '#e4b45f', cls: 'na' },
   error: { label: '请求失败', color: '#e97a7a', cls: 'fail' }
 };
 const fedMeta = (status) => FED_STATUS[status] || { label: status || '未知状态', color: '#6e7787', cls: 'na' };
@@ -1213,15 +1298,77 @@ function renderFederated(report) {
   `;
 }
 
-/* ------------------------------ 页面上下文 ------------------------------ */
+/* ------------------------------ 当前页面自动识别 ------------------------------ */
 
-async function getPageContext() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !/bilibili\.com/.test(tab.url || '')) return null;
+/** 读取当前标签页；URL 是主要依据，content script 只作兜底且必须限时。 */
+async function currentTab() {
   try {
-    const res = await chrome.tabs.sendMessage(tab.id, { type: 'BILILENS_GET_PAGE_CONTEXT' });
-    return res && res.ok ? res.context : null;
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab || null;
   } catch { return null; }
+}
+
+async function getPageContext(tab) {
+  if (!tab) tab = await currentTab();
+  if (!tab || tab.id === undefined || !isBiliPage(tab.url)) return null;
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(chrome.tabs.sendMessage(tab.id, { type: 'BILILENS_GET_PAGE_CONTEXT' }))
+        .then((res) => (res && res.ok ? res.context : null)),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2_000); })
+    ]);
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+async function detectCurrent() {
+  const tab = await currentTab();
+  const url = (tab && tab.url) || '';
+  if (!isBiliPage(url)) return { uid: '', bvid: '', source: 'none', url, context: null };
+  const context = await getPageContext(tab);
+  const det = pickUid({ url, context });
+  return { ...det, bvid: bvidFromUrl(url), url, context };
+}
+
+function renderAutofillHint(el, text, tone, target) {
+  if (!el) return;
+  el.className = `autofill-hint${tone ? ' ' + tone : ''}`;
+  el.innerHTML = `<span>${esc(text)}</span><button class="text-btn" data-redetect="${esc(target)}">重新识别</button>`;
+}
+
+function renderDetection(det) {
+  state.detected = det;
+  renderAutofillHint($('#profile-autofill'), describeDetection(det, 'uid'), det.uid ? '' : 'none', 'uid');
+  renderAutofillHint($('#fed-autofill'), describeDetection(det, 'uid'), det.uid ? '' : 'none', 'uid');
+  renderAutofillHint($('#video-autofill'), describeDetection(det, 'bvid'), det.bvid ? '' : 'none', 'bvid');
+}
+
+/** 打开弹窗时只填空输入框；用户点「重新识别」时 force=true 覆盖当前值。 */
+async function applyDetection(force = false, focus = 'uid', log = false) {
+  const det = await detectCurrent();
+  const fill = (selector, value) => {
+    if (value && (force || !$(selector).value.trim())) $(selector).value = value;
+  };
+  fill('#user-input', det.uid);
+  fill('#federated-input', det.uid);
+  fill('#video-input', det.bvid);
+  renderDetection(det);
+  const source = UID_SOURCE_LABEL[det.source] || '当前页面';
+  if (det.uid || det.bvid) {
+    const label = focus === 'bvid' && det.bvid
+      ? `已自动识别当前页面视频 ${det.bvid}`
+      : `已自动识别当前页面 UID ${det.uid}（来源：${source}）`;
+    setStatus(label, 'busy');
+    if (log) appendLive(label);
+  } else {
+    const onBili = isBiliPage(det.url);
+    const label = onBili
+      ? '当前标签页未识别到 B 站目标，请手动输入'
+      : '就绪 · 当前标签页不是 B 站页面，请手动输入';
+    setStatus(label, onBili ? 'error' : '');
+    if (log) appendLive(label, 'warn');
+  }
+  return det;
 }
 
 /* ------------------------------ 事件绑定 ------------------------------ */
@@ -1235,7 +1382,7 @@ $('#profile-btn').addEventListener('click', async (event) => {
   setStatus('正在采集公开数据', 'busy');
   try {
     const res = await send({ type: 'PROFILE_USER', input });
-    if (!res.ok) { showError($('#profile-result'), res.error); setStatus('采集失败', 'error'); return; }
+    if (!res.ok) { showError($('#profile-result'), res.error, diagnose(res).tips); setStatus('采集失败', 'error'); return; }
     state.report = res.report;
     $('#profile-result').innerHTML = renderProfile(res.report);
     renderReportSummary();
@@ -1247,21 +1394,32 @@ $('#profile-btn').addEventListener('click', async (event) => {
 });
 
 $('#use-page-btn').addEventListener('click', async () => {
-  const ctx = await getPageContext();
-  if (!ctx) { setStatus('当前标签页不是可识别的 B 站页面', 'error'); return; }
-  if (ctx.type === 'user' && ctx.mid) {
-    $('#user-input').value = ctx.mid;
-    setStatus(`已填入当前页面 UID ${ctx.mid}`);
-  } else if (ctx.type === 'video' && ctx.bvid) {
-    switchTab('comments');
-    $('#video-input').value = ctx.bvid;
-    setStatus(`已填入当前视频 ${ctx.bvid}`);
-  } else if (ctx.mids && ctx.mids.length) {
-    $('#user-input').value = ctx.mids[0];
-    setStatus(`当前页面识别到 ${ctx.mids.length} 个用户，已填入首个`);
-  } else {
-    setStatus('页面未识别到可用目标，请手动输入', 'error');
-  }
+  const det = await applyDetection(true, 'uid', true);
+  if (!det.uid && det.bvid) switchTab('comments');
+});
+$('#fed-use-page-btn').addEventListener('click', () => applyDetection(true, 'uid', true));
+$('#video-use-page-btn').addEventListener('click', () => applyDetection(true, 'bvid', true));
+$$('.autofill-hint').forEach((hint) => hint.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-redetect]');
+  if (button) applyDetection(true, button.dataset.redetect, true);
+}));
+
+// 手动改动输入框时把提示切成「已手动输入」，并保留一键恢复自动识别。
+[
+  ['#user-input', '#profile-autofill', 'uid'],
+  ['#federated-input', '#fed-autofill', 'uid'],
+  ['#video-input', '#video-autofill', 'bvid']
+].forEach(([inputSel, hintSel, kind]) => {
+  $(inputSel).addEventListener('input', () => {
+    const det = state.detected || { uid: '', bvid: '', source: 'none' };
+    const expected = kind === 'bvid' ? det.bvid : det.uid;
+    const value = $(inputSel).value.trim();
+    if (!value || !expected || value === expected) {
+      renderAutofillHint($(hintSel), describeDetection(det, kind), expected ? '' : 'none', kind);
+    } else {
+      renderAutofillHint($(hintSel), `已手动输入 ${value}；点「重新识别」可恢复当前页面目标`, 'manual', kind);
+    }
+  });
 });
 
 $('#profile-result').addEventListener('click', (event) => {
@@ -1292,7 +1450,7 @@ $('#analyze-video-btn').addEventListener('click', async (event) => {
       pages: Number($('#video-pages').value),
       maxUsers: Number($('#video-maxusers').value)
     });
-    if (!res.ok) { showError($('#comments-result'), res.error || '分析失败'); setStatus('分析失败', 'error'); return; }
+    if (!res.ok) { showError($('#comments-result'), res.error || '分析失败', diagnose(res).tips); setStatus('分析失败', 'error'); return; }
     state.report = res.report;
     $('#comments-result').innerHTML = renderBatch(res.report);
     renderReportSummary();
@@ -1310,7 +1468,7 @@ $('#fetch-comments-btn').addEventListener('click', async (event) => {
   setStatus('正在抓取评论', 'busy');
   try {
     const res = await send({ type: 'FETCH_COMMENTS', videoInput, pages: Number($('#video-pages').value) });
-    if (!res.ok) { showError($('#comments-result'), res.error || '抓取失败'); setStatus('抓取失败', 'error'); return; }
+    if (!res.ok) { showError($('#comments-result'), res.error || '抓取失败', diagnose(res).tips); setStatus('抓取失败', 'error'); return; }
     const rows = res.comments.slice(0, 20).map((c) => `<tr><td>${esc(c.uname || c.mid)}</td><td class="num">${num(c.mid)}</td><td>${esc(c.message.slice(0, 50))}</td><td>${esc(ts(c.ctime).slice(0, 16))}</td></tr>`).join('');
     $('#comments-result').innerHTML = `<div class="card"><div class="card-title">${esc(res.videoTitle || '视频')} · 共 ${res.comments.length} 条评论（展示前 20 条）</div>
       <table><thead><tr><th>昵称</th><th class="num">UID</th><th>内容</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table>
@@ -1501,17 +1659,38 @@ async function runFederated(force) {
   const siteIds = [...state.federatedSelected];
   if (!siteIds.length) { showError(container, '请至少勾选一个查询站点'); return; }
   const button = force ? $('#federated-force-btn') : $('#federated-btn');
+  const log = $('#fed-live');
+  const startedAt = Date.now();
+  if (liveHideTimer) { clearTimeout(liveHideTimer); liveHideTimer = null; }
   setBusy(button, true, '聚合中…');
   setProgress(0, 100, '正在采集官方画像并按站点串行查询', 'federated');
-  container.innerHTML = '<div class="empty">正在查询第三方公开数据，请勿关闭弹窗…</div>';
+  container.innerHTML = '<div class="empty">正在查询第三方公开数据，请勿关闭弹窗…<br />整轮最长 120 秒；下方日志逐条显示当前步骤，超时会自动中止并说明原因。</div>';
+  log.innerHTML = '';
+  log.classList.remove('hidden');
+  appendLive(`开始聚合 ${siteIds.length} 个站点${force ? '（忽略缓存）' : ''}；页面通道 4 秒无响应会回退后台直连`);
   try {
     const res = await send({ type: 'ANALYZE_FEDERATED', input, force, siteIds });
-    if (!res.ok) { showError(container, res.error); setStatus('多源聚合失败', 'error'); return; }
+    if (!res.ok) {
+      const d = diagnose(res);
+      showError(container, d.text, d.tips);
+      setStatus('多源聚合失败 · 见排查建议', 'error');
+      appendLive(`失败：${d.text}`, 'warn');
+      return;
+    }
     state.report = res.report;
     state.federatedReport = res.report;
     container.innerHTML = renderFederated(res.report);
     renderReportSummary();
-    setStatus(`多源聚合完成 · ${res.federated.sitesWithData}/${res.federated.sitesTotal} 个站点有数据`);
+    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const timedOut = res.timedOutSites || [];
+    if (timedOut.length) {
+      container.insertAdjacentHTML('afterbegin',
+        `<div class="notice warn"><strong>部分站点未查询。</strong>已到整轮时间上限，${esc(timedOut.join('、'))} 未发起请求。请在下方「站点状态矩阵」对这些站点单独点「刷新」补查，或减少勾选站点后重试。</div>`);
+      appendLive(`${timedOut.length} 个站点因时间上限未查询，可单独刷新补查`, 'warn');
+    }
+    setStatus(`多源聚合完成 · ${res.federated.sitesWithData}/${res.federated.sitesTotal} 个站点有数据 · ${secs}s`);
+    appendLive(`完成，用时 ${secs} 秒${res.federated.sitesTimedOut ? `，${res.federated.sitesTimedOut} 个站点超时` : ''}`);
+    liveHideTimer = setTimeout(() => log.classList.add('hidden'), 15_000);
   } finally {
     setBusy(button, false);
     hideProgress();
@@ -1559,12 +1738,20 @@ $('#federated-result').addEventListener('click', async (event) => {
   setBusy(button, true, '刷新中…');
   try {
     const res = await send({ type: 'FEDERATED_REFRESH_SITE', siteId: button.dataset.fedRefresh });
-    if (!res.ok) { setStatus(res.error, 'error'); return; }
+    if (!res.ok) {
+      const d = diagnose(res);
+      setStatus(d.text, 'error');
+      appendLive(`单站刷新失败：${d.text}`, 'warn');
+      return;
+    }
     state.report = res.report;
     state.federatedReport = res.report;
     $('#federated-result').innerHTML = renderFederated(res.report);
     renderReportSummary();
-    setStatus('已强制刷新该站点并更新报告');
+    const target = ((res.federated && res.federated.statuses) || [])
+      .find((s) => s.siteId === button.dataset.fedRefresh);
+    setStatus(target ? `已刷新 ${target.siteName}：${target.message}` : '已强制刷新该站点并更新报告');
+    appendLive(target ? `${target.siteName} 刷新结果：${target.message}` : '单站刷新完成');
   } finally { setBusy(button, false); }
 });
 
@@ -1599,8 +1786,15 @@ $('#settings-btn').addEventListener('click', () => chrome.runtime.openOptionsPag
 $('#open-options-btn').addEventListener('click', () => chrome.runtime.openOptionsPage());
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message && message.type === 'BILILENS_PROGRESS') {
+  if (!message) return;
+  if (message.type === 'BILILENS_PROGRESS') {
     setProgress(message.done, message.total, message.message, message.phase);
+    if (message.phase === 'federated' && message.message) appendLive(message.message, 'info');
+    return;
+  }
+  if (message.type === 'BILILENS_NOTICE') {
+    appendLive(message.text, message.level);
+    if (message.level === 'warn') setStatus(`注意：${message.text}`, 'busy');
   }
 });
 
@@ -1635,9 +1829,6 @@ chrome.runtime.onMessage.addListener((message) => {
     }
   }
 
-  state.pageContext = await getPageContext();
-  if (state.pageContext && state.pageContext.mid && !$('#federated-input').value) {
-    $('#federated-input').value = state.pageContext.mid;
-  }
-  setStatus('就绪 · 数据仅存本机');
+  // 打开弹窗即自动识别当前页面 UID / BV 号；只填空输入框，不覆盖已有报告目标
+  await applyDetection();
 })();

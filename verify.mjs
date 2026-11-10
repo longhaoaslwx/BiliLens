@@ -360,6 +360,13 @@ assert.ok(fedCsv.includes('所涉场次观看人次'));
 assert.ok(fedCsv.includes('已取回可及场次'));
 const noSiteQuery = await queryAll('123', { siteIds: [] });
 assert.equal(noSiteQuery.length, 0, 'explicit empty siteIds must not fall back to all sites');
+// 回归：整轮时间到点后，未查询的站点必须留下明确的 timeout 记录，而不是静默消失
+const deadlineQuery = await queryAll('123', {
+  siteIds: ['danmakus', 'aicu', 'vtbs'], deadlineAt: Date.now() - 1
+});
+assert.equal(deadlineQuery.length, 3);
+assert.ok(deadlineQuery.every((r) => r.status === 'timeout'), 'expired deadline must mark sites as timeout');
+assert.ok(deadlineQuery.every((r) => /刷新/.test(r.message)), 'timeout message must tell the user how to retry');
 console.log('OK  federated parsers + live aggregation + summary + F rules gate + CSV columns');
 
 // 8. 统一数据清洗层：四道工序、去重、缺失、异常、字段规范化

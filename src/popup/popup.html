@@ -52,10 +52,11 @@
           <button id="profile-btn" class="primary">开始画像</button>
         </div>
         <div class="hint-row">
-          <button id="use-page-btn" class="text-btn">使用当前页面识别的用户</button>
+          <button id="use-page-btn" class="text-btn">识别当前页面</button>
           <span class="sep">·</span>
           <span class="hint">昵称检索依赖 WBI 签名接口，失败时请直接填 UID</span>
         </div>
+        <div id="profile-autofill" class="autofill-hint hidden"></div>
       </div>
       <div id="profile-result" class="result"></div>
     </section>
@@ -76,6 +77,10 @@
           <button id="analyze-video-btn" class="primary">抓取评论并画像</button>
           <button id="fetch-comments-btn" class="secondary">仅抓取评论</button>
         </div>
+        <div class="hint-row">
+          <button id="video-use-page-btn" class="text-btn">识别当前页面视频</button>
+        </div>
+        <div id="video-autofill" class="autofill-hint hidden"></div>
         <p class="hint">每个账号 2 个公开接口请求，默认按 0.9 秒节流；仅分析前 N 位评论者，存在样本偏差。</p>
       </div>
       <div id="comments-result" class="result"></div>
@@ -89,10 +94,13 @@
           <button id="federated-btn" class="primary">聚合画像</button>
         </div>
         <div class="hint-row">
+          <button id="fed-use-page-btn" class="text-btn">识别当前页面 UID</button>
+          <span class="sep">·</span>
           <button id="federated-force-btn" class="text-btn">忽略缓存强制刷新</button>
           <span class="sep">·</span>
           <button id="federated-clear-btn" class="text-btn">清除多源缓存</button>
         </div>
+        <div id="fed-autofill" class="autofill-hint hidden"></div>
         <div class="hint-row">
           <button id="open-report-btn" class="text-btn">打开详细网页报告 ↗</button>
           <span class="sep">·</span>
@@ -113,9 +121,11 @@
         </div>
         <div id="federated-site-list" class="site-list"></div>
       </details>
+      <p class="hint">单次聚合最长 120 秒：B 站页面通道 4 秒无响应会自动回退后台直连；超时站点可在结果页单独「刷新」补查。每一步都会写入下方日志，超时会自动中止并给出原因与排查建议。</p>
       <div class="notice">
         <strong>第三方数据边界。</strong>七个查询项均按 UID 读取公开数据（含 Danmakus 弹幕行为记录）。所有原始结果先经去重、缺失值处理、异常值处理与字段规范化，再用于完整聚合画像与全部可视化图表；结果可能滞后、缺失或口径不同，只作证据与可视化，不作为事实结论。缓存仅存本机，可一键清除。
       </div>
+      <div id="fed-live" class="live-log hidden" aria-live="polite"></div>
       <div id="federated-result" class="result"></div>
     </section>
 

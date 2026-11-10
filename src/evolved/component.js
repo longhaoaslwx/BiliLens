@@ -487,12 +487,17 @@ function blRenderPortrait() {
   return html;
 }
 
+const BL_STATUS_LABEL = {
+  data: '有结构化数据', official: '官方档案', page_only: '仅页面可达',
+  not_listed: '站点未收录', cooldown: '风控冷却', timeout: '超时 / 未查询', error: '请求失败'
+};
+
 function blRenderFederated() {
   const r = blState.report;
   const f = r && r.federated;
   if (!f) return '<div class="empty">暂无多源数据</div>';
   const statuses = (f.statuses || []).map((s) =>
-    `<tr><td>${blEsc(s.siteName)}</td><td>${blEsc(s.status)}</td><td>${blEsc(s.httpStatus)}</td>` +
+    `<tr><td>${blEsc(s.siteName)}</td><td>${blEsc(BL_STATUS_LABEL[s.status] || s.status)}</td><td>${blEsc(s.httpStatus)}</td>` +
     `<td>${blEsc(s.elapsedMs)} ms</td><td>${s.cached ? '是' : '否'}</td>` +
     `<td>${blEsc(s.message)}</td><td><a href="${blEsc(s.pageUrl)}" target="_blank" rel="noopener" style="color:#f0729a">人工核验</a></td></tr>`).join('');
   const channels = (f.topChannels || []).map((c) =>
@@ -502,7 +507,11 @@ function blRenderFederated() {
     `<tr><td>${blEsc(e.site)}</td><td>${blEsc(e.label || e.type || '')}</td><td>${blEsc(e.text || e.value || '')}</td></tr>`).join('');
   const sources = (r.results || []).flatMap((x) => (x.sourceUrls || []).map((u) =>
     `<tr><td>${blEsc(x.siteName)}</td><td>${blEsc(u)}</td></tr>`)).join('');
-  return `<div class="notice"><strong>第三方数据边界。</strong>${blEsc((r.profile && r.profile.federated && r.profile.federated.disclaimer) || '仅作证据与可视化，不作为事实结论。')}</div>` +
+  const timeoutNote = f.sitesTimedOut
+    ? `<div class="notice"><strong>部分站点未查询。</strong>整轮聚合已达 120 秒上限，标记为「超时 / 未查询」的站点未发起请求；可减少勾选站点，或稍后单独重试。</div>`
+    : '';
+  return timeoutNote +
+    `<div class="notice"><strong>第三方数据边界。</strong>${blEsc((r.profile && r.profile.federated && r.profile.federated.disclaimer) || '仅作证据与可视化，不作为事实结论。')}</div>` +
     blCard('关键指标', `<div class="grid">${[
       blMetric('查询站点', f.sitesTotal), blMetric('有数据站点', f.sitesWithData),
       blMetric('缓存命中', f.sitesCached), blMetric('失败 / 冷却', f.sitesFailed),
@@ -636,6 +645,55 @@ function blApplyChannelFilter() {
   });
 }
 
+let blNavTimer = null;
+let blLastHref = '';
+
+function blSetAutofill(shadow, text, ok) {
+  const el = shadow && shadow.querySelector('[data-bl-autofill]');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = ok ? '#6ccf9c' : '#9ba4b3';
+}
+
+/** 从当前页面重新识别 UID；force=true 覆盖用户已输入的值。 */
+function blDetectAndFill(shadow, uidInput, options) {
+  const opts = options || {};
+  const uid = blDetectUid();
+  if (uid && uidInput && (opts.force || !String(uidInput.value || '').trim())) uidInput.value = uid;
+  if (uid) {
+    blState.uid = uid;
+    blSetAutofill(shadow, `已自动识别当前页面 UID ${uid}`, true);
+  } else {
+    blSetAutofill(shadow, '当前页面未识别到 UID，请手动输入', false);
+  }
+  if (opts.toast) {
+    try { blToast(uid ? `已识别当前页面 UID ${uid}` : '当前页面未识别到 UID', uid ? 'success' : 'error'); }
+    catch (_) { /* 忽略 */ }
+  }
+  return uid;
+}
+
+/** B 站是 SPA：pushState 导航不会重新挂载组件，需轮询地址变化并重新识别。 */
+function blWatchNavigation(shadow, uidInput) {
+  try { blLastHref = String(location.href || ''); } catch (_) { return; }
+  if (typeof setInterval !== 'function') return;
+  if (blNavTimer) clearInterval(blNavTimer);
+  blNavTimer = setInterval(() => {
+    let href = '';
+    try { href = String(location.href || ''); } catch (_) { return; }
+    if (href === blLastHref) return;
+    blLastHref = href;
+    const uid = blDetectUid();
+    if (uid && uidInput) {
+      uidInput.value = uid;
+      blState.uid = uid;
+      blSetAutofill(shadow, `页面已跳转，自动识别 UID ${uid}`, true);
+    } else if (!uid) {
+      blSetAutofill(shadow, '当前页面未识别到 UID，请手动输入', false);
+    }
+  }, 1_500);
+}
+
 function blMount() {
   if (blState.root && document.body.contains(blState.root)) return;
   const host = document.createElement('div');
@@ -651,15 +709,16 @@ function blMount() {
     `<input class="bl-input" data-bl-uid placeholder="B 站 UID" style="width:130px" value="">` +
     `<button class="bl-btn primary" data-act="run">分析</button>` +
     `<button class="bl-btn" data-act="rerun">刷新</button>` +
+    `<button class="bl-btn" data-act="detect" title="重新识别当前页面 UID">识别</button>` +
     `<button class="bl-close" data-act="toggle" aria-label="关闭">×</button></div>` +
+    `<div data-bl-autofill style="padding:3px 10px;font-size:11px;color:#6ccf9c;background:rgba(108,207,156,.08);border-bottom:1px solid rgba(108,207,156,.2)"></div>` +
     `<div class="bl-tabs">${BL_TABS.map((t) => `<button class="bl-tab${t.id === 'overview' ? ' on' : ''}" data-tab="${t.id}">${t.label}</button>`).join('')}</div>` +
     `<div class="bl-body" data-bl-body></div></div>`;
   blState.root = host;
   blState.shadow = shadow;
   const uidInput = shadow.querySelector('[data-bl-uid]');
-  const detected = blDetectUid();
-  blState.uid = detected;
-  if (uidInput) uidInput.value = detected;
+  blDetectAndFill(shadow, uidInput, {});
+  blWatchNavigation(shadow, uidInput);
 
   shadow.addEventListener('click', (event) => {
     const target = event.target;
@@ -675,6 +734,7 @@ function blMount() {
       if (!panel.hidden) blRender();
     } else if (act === 'run') blRun((uidInput && uidInput.value || '').trim(), false);
     else if (act === 'rerun') blRun((uidInput && uidInput.value || '').trim(), true);
+    else if (act === 'detect') blDetectAndFill(shadow, uidInput, { force: true, toast: true });
     else if (act === 'export-json') blExport('json');
     else if (act === 'export-csv') blExport('csv');
     else if (act === 'clear-cache') {
@@ -704,6 +764,7 @@ function blMount() {
 }
 
 function blUnmount() {
+  if (blNavTimer) { clearInterval(blNavTimer); blNavTimer = null; }
   if (blState.root && blState.root.parentNode) blState.root.parentNode.removeChild(blState.root);
   blState.root = null;
   blState.shadow = null;
@@ -737,6 +798,7 @@ async function blRun(uid, force) {
     const results = await __M.federated.queryAll(blState.uid, {
       siteIds: opts.siteIds,
       force: !!force,
+      deadlineAt: Date.now() + 120_000,
       ttlMin: opts.ttlMin,
       timeoutMs: opts.timeoutMs,
       redact: opts.redact,

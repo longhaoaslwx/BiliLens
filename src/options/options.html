@@ -67,6 +67,7 @@
           <input type="number" id="federatedTimeoutMs" min="3000" max="60000" step="1000" />
         </label>
       </div>
+      <p class="desc"><strong>超时说明：</strong>此项只控制第三方站点的单次请求。B 站页面通道固定 4 秒、单个官方请求 15 秒硬上限，整轮聚合 120 秒；页面通道无响应会自动回退后台直连。若聚合经常久等，建议调低到 5000–8000 毫秒，让挂起的站点更快跳过。整轮到点后未查询的站点会在结果页标为「超时 / 未查询」，可单独点「刷新」补查。</p>
       <label class="check">
         <input type="checkbox" id="federatedRedact" />
         <span>多源缓存中不保存第三方评论原文（仅保留时间与计数）</span>
